@@ -1,0 +1,27 @@
+Demo/
+
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# VS Code settings
+.vscode/
+
+# Backup and temporary files
+*~
+*.swp
+*.bak
+*.tmp
+
+# Executables and binaries
+*.elf
+*.bin
+*.hex
+*.uf2
+*.map
+
+# Logs
+*.log
