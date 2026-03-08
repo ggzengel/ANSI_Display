@@ -1,4 +1,5 @@
 #include "tusb.h"
+#include "serial.h"
 
 // Device descriptor
 static const tusb_desc_device_t desc_device = {
@@ -36,13 +37,6 @@ uint8_t const * tud_descriptor_configuration_cb(uint8_t index) {
     return desc_configuration;
 }
 
-
-#include "pico/unique_id.h"
-#include <stdio.h>
-
-// Buffer for dynamic serial string
-char serial_str[17] = {0}; // 16 hex chars + null
-
 // String descriptors
 static const char *string_desc_arr[] = {
     (const char[]){0x09, 0x04}, // 0: English (0x0409)
@@ -51,15 +45,6 @@ static const char *string_desc_arr[] = {
     serial_str,                 // 3: Serial (set at runtime)
     "CDC Interface"            // 4: CDC Interface
 };
-// Initialize serial string from unique board ID
-void init_serial_string(void) {
-    pico_unique_board_id_t id;
-    pico_get_unique_board_id(&id);
-    for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; ++i) {
-        sprintf(serial_str + i*2, "%02X", id.id[i]);
-    }
-    serial_str[16] = '\0';
-}
 
 static uint16_t _desc_str[32];
 

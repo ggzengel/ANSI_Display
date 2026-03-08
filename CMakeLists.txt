@@ -58,7 +58,7 @@ target_link_libraries(LCD PUBLIC Config)
 target_include_directories(LCD PUBLIC ${CMAKE_CURRENT_LIST_DIR}/lib/Config)
 
 # Add executable from src/main.c
-add_executable(ANSI_Display src/main.c src/ansi.c src/usb_descriptors.c)
+add_executable(ANSI_Display src/main.c src/ansi.c src/serial.c src/usb_descriptors.c)
 
 pico_set_program_name(ANSI_Display "ANSI_Display")
 pico_set_program_version(ANSI_Display "0.1")
