@@ -1,76 +1,54 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 #include "LCD_1in47.h"
-
 #include "GUI_Paint.h"
 #include "fonts.h"
 
-// Draw a 'T' in the center and border-detecting boxes using direct draw
-void draw_orientation_and_borders(void) {
-    LCD_1IN47_Clear(WHITE);
-
-    // If rotated by 90 degrees (HORIZONTAL), swap width and height
-    uint16_t w = LCD_1IN47.WIDTH;
-    uint16_t h = LCD_1IN47.HEIGHT;
-
-    // Outer border
-    for (uint16_t x = 0; x <= w-1; ++x) {
-        LCD_1IN47_DisplayPoint(x, 0, BLACK);
-        LCD_1IN47_DisplayPoint(x, h-1, BLACK);
-    }
-    for (uint16_t y = 0; y <= h-1; ++y) {
-        LCD_1IN47_DisplayPoint(0, y, BLACK);
-        LCD_1IN47_DisplayPoint(w-1, y, BLACK);
-    }
-    // Inner border (10px inset)
-    for (uint16_t x = 10; x <= w-11; ++x) {
-        LCD_1IN47_DisplayPoint(x, 10, GRAY);
-        LCD_1IN47_DisplayPoint(x, h-11, GRAY);
-    }
-    for (uint16_t y = 10; y <= h-11; ++y) {
-        LCD_1IN47_DisplayPoint(10, y, GRAY);
-        LCD_1IN47_DisplayPoint(w-11, y, GRAY);
-    }
-
-    // Draw a large 'T' in the center using two lines
-    uint16_t cx = w/2;
-    uint16_t cy = h/2;
-    uint16_t T_width = w/4;
-    uint16_t T_height = h/3;
-    // Horizontal bar of T
-    for (uint16_t x = cx - T_width/2; x <= cx + T_width/2 && x <= w-1; ++x) {
-        if (x < w)
-            LCD_1IN47_DisplayPoint(x, cy - T_height/2, RED);
-    }
-    // Vertical bar of T
-    for (uint16_t y = cy - T_height/2; y <= cy + T_height/2 && y <= h-1; ++y) {
-        if (y < h)
-            LCD_1IN47_DisplayPoint(cx, y, RED);
-    }
-
-    // Optionally, draw crosshairs for orientation
-    for (uint16_t y = 0; y <= h-1; ++y) {
-        if (y % 4 < 2 && cx < w)
-            LCD_1IN47_DisplayPoint(cx, y, BLUE); // Dotted vertical
-    }
-    for (uint16_t x = 0; x <= w-1; ++x) {
-        if (x % 4 < 2 && cy < h)
-            LCD_1IN47_DisplayPoint(x, cy, BLUE); // Dotted horizontal
-    }
-}
-
+// ========================================
+// CONSTANTS AND TYPE DEFINITIONS
+// ========================================
 
 #define ESC_BUF_SIZE 32
-static char esc_buf[ESC_BUF_SIZE];
-static uint8_t esc_len = 0;
-
-// --- ANSI/VT100 Color State ---
 #define ANSI_COLOR_DEFAULT 0xFFFF
+
+// Font size (should match Font16)
+#define CHAR_WIDTH 11
+#define CHAR_HEIGHT 16
+#define CHAR_SPACING 0  // No space between chars
+
+// ANSI/VT100 Color State Type
 typedef struct {
     uint16_t fg;
     uint16_t bg;
 } ansi_color_state_t;
-static ansi_color_state_t ansi_color = { .fg = WHITE, .bg = BLACK };
+
+// Character cell type for screen buffer
+typedef struct {
+    char ch;
+    uint16_t fg;
+    uint16_t bg;
+} cell_t;
+
+// ========================================
+// GLOBAL VARIABLES
+// ========================================
+
+// Screen dimensions (calculated at runtime)
+int SCREEN_COLS = 0;
+int SCREEN_ROWS = 0;
+
+// Screen buffer and cursor state
+cell_t **screen = NULL;
+uint16_t cursor_row = 0, cursor_col = 0;
+
+// ANSI escape sequence processing
+static char esc_buf[ESC_BUF_SIZE];
+static uint8_t esc_len = 0;
+static ansi_color_state_t ansi_color = {.fg = WHITE, .bg = BLACK};
+
+// Paint library image buffer
+UDOUBLE Imagesize;
+UWORD *BlackImage;
 
 // Standard 8 colors + bright 8 colors (16 total)
 static const uint16_t ansi_palette[16] = {
@@ -92,43 +70,38 @@ static const uint16_t ansi_palette[16] = {
     0xFFFF      // 15: Bright White
 };
 
+// ========================================
+// FORWARD DECLARATIONS
+// ========================================
 
-// Font size (should match Font16)
-#define CHAR_WIDTH 11
-#define CHAR_HEIGHT 16
-#define CHAR_SPACING 0 // No space between chars
+void init_serial_string(void);
+extern char serial_str[17];
 
-// Calculate screen size based on LCD dimensions and font size
-// These will be set at runtime
-int SCREEN_COLS = 0;
-int SCREEN_ROWS = 0;
-typedef struct {
-    char ch;
-    uint16_t fg;
-    uint16_t bg;
-} cell_t;
-cell_t **screen = NULL;
-uint16_t cursor_row = 0, cursor_col = 0;
+// ========================================
+// ANSI/TERMINAL FUNCTIONS
+// ========================================
 
-// Dynamically allocate image buffer for Paint
-UDOUBLE Imagesize;
-UWORD *BlackImage;
-
-void clear_screen() {
-    for (int r = 0; r < SCREEN_ROWS; ++r)
+void clear_screen(void) {
+    for (int r = 0; r < SCREEN_ROWS; ++r) {
         for (int c = 0; c < SCREEN_COLS; ++c) {
             screen[r][c].ch = ' ';
             screen[r][c].fg = WHITE;
             screen[r][c].bg = BLACK;
         }
+    }
     cursor_row = cursor_col = 0;
+    
     // Clear the image buffer too
     Paint_Clear(BLACK);
 }
 
 void move_cursor(uint16_t row, uint16_t col) {
-    if (row < SCREEN_ROWS) cursor_row = row;
-    if (col < SCREEN_COLS) cursor_col = col;
+    if (row < SCREEN_ROWS) {
+        cursor_row = row;
+    }
+    if (col < SCREEN_COLS) {
+        cursor_col = col;
+    }
 }
 
 // Parse SGR (Select Graphic Rendition) color codes
@@ -139,10 +112,15 @@ static void handle_ansi_sgr(const char *params) {
     while (*s && n < 8) {
         p[n++] = atoi(s);
         s = strchr(s, ';');
-        if (!s) break;
+        if (!s) {
+            break;
+        }
         ++s;
     }
-    if (n == 0) n = 1, p[0] = 0; // Default SGR 0
+    if (n == 0) {
+        n = 1;
+        p[0] = 0; // Default SGR 0
+    }
     for (int i = 0; i < n; ++i) {
         if (p[i] == 0) { // Reset
             ansi_color.fg = WHITE;
@@ -167,10 +145,10 @@ static void handle_ansi_sgr(const char *params) {
 void handle_ansi(const char *seq) {
     if (seq[0] == '[') {
         // SGR: CSI ... m
-        char last = seq[strlen(seq)-1];
+        char last = seq[strlen(seq) - 1];
         if (last == 'm') {
             char paramstr[ESC_BUF_SIZE] = {0};
-            strncpy(paramstr, seq+1, strlen(seq)-2); // skip '[' and 'm'
+            strncpy(paramstr, seq + 1, strlen(seq) - 2); // skip '[' and 'm'
             handle_ansi_sgr(paramstr);
         } else if (seq[1] == '2' && seq[2] == 'J') {
             clear_screen();
@@ -180,8 +158,12 @@ void handle_ansi(const char *seq) {
             // Custom: CSI ?PwmValue b  (e.g. ESC[?80b sets brightness to 80%)
             int pwm = 100;
             sscanf(seq + 2, "%d", &pwm);
-            if (pwm < 0) pwm = 0;
-            if (pwm > 100) pwm = 100;
+            if (pwm < 0) {
+                pwm = 0;
+            }
+            if (pwm > 100) {
+                pwm = 100;
+            }
             DEV_SET_PWM((uint8_t)pwm);
         } else {
             int row = 0, col = 0;
@@ -213,7 +195,7 @@ void put_char(char ch) {
             scroll_up();
             cursor_row = SCREEN_ROWS - 1;
         }
-    } else if (ch >= 32 && ch <= 126) { // Printable character triggers wrap
+    } else if (ch >= 32 && ch <= 126) {  // Printable character triggers wrap
         screen[cursor_row][cursor_col].ch = ch;
         screen[cursor_row][cursor_col].fg = ansi_color.fg;
         screen[cursor_row][cursor_col].bg = ansi_color.bg;
@@ -285,7 +267,6 @@ void process_char(char ch) {
     }
 }
 
-
 // Render the screen buffer to the LCD using Paint_DrawChar
 void render_screen_to_lcd(void) {
     for (int r = 0; r < SCREEN_ROWS; ++r) {
@@ -305,41 +286,97 @@ void render_screen_to_lcd(void) {
     }
 }
 
+// ========================================
+// HARDWARE TEST FUNCTIONS
+// ========================================
 
-// Forward declaration for serial string
-void init_serial_string(void);
-extern char serial_str[17];
+// Draw a 'T' in the center and border-detecting boxes using direct draw
+void draw_orientation_and_borders(void) {
+    LCD_1IN47_Clear(WHITE);
+
+    // If rotated by 90 degrees (HORIZONTAL), swap width and height
+    uint16_t w = LCD_1IN47.WIDTH;
+    uint16_t h = LCD_1IN47.HEIGHT;
+
+    // Outer border
+    for (uint16_t x = 0; x <= w - 1; ++x) {
+        LCD_1IN47_DisplayPoint(x, 0, BLACK);
+        LCD_1IN47_DisplayPoint(x, h - 1, BLACK);
+    }
+    for (uint16_t y = 0; y <= h - 1; ++y) {
+        LCD_1IN47_DisplayPoint(0, y, BLACK);
+        LCD_1IN47_DisplayPoint(w - 1, y, BLACK);
+    }
+    // Inner border (10px inset)
+    for (uint16_t x = 10; x <= w - 11; ++x) {
+        LCD_1IN47_DisplayPoint(x, 10, GRAY);
+        LCD_1IN47_DisplayPoint(x, h - 11, GRAY);
+    }
+    for (uint16_t y = 10; y <= h - 11; ++y) {
+        LCD_1IN47_DisplayPoint(10, y, GRAY);
+        LCD_1IN47_DisplayPoint(w - 11, y, GRAY);
+    }
+
+    // Draw a large 'T' in the center using two lines
+    uint16_t cx = w / 2;
+    uint16_t cy = h / 2;
+    uint16_t T_width = w / 4;
+    uint16_t T_height = h / 3;
+    
+    // Horizontal bar of T
+    for (uint16_t x = cx - T_width / 2; x <= cx + T_width / 2 && x <= w - 1; ++x) {
+        if (x < w) {
+            LCD_1IN47_DisplayPoint(x, cy - T_height / 2, RED);
+        }
+    }
+    
+    // Vertical bar of T
+    for (uint16_t y = cy - T_height / 2; y <= cy + T_height / 2 && y <= h - 1; ++y) {
+        if (y < h) {
+            LCD_1IN47_DisplayPoint(cx, y, RED);
+        }
+    }
+
+    // Optionally, draw crosshairs for orientation
+    for (uint16_t y = 0; y <= h - 1; ++y) {
+        if (y % 4 < 2 && cx < w) {
+            LCD_1IN47_DisplayPoint(cx, y, BLUE); // Dotted vertical
+        }
+    }
+    for (uint16_t x = 0; x <= w - 1; ++x) {
+        if (x % 4 < 2 && cy < h) {
+            LCD_1IN47_DisplayPoint(x, cy, BLUE); // Dotted horizontal
+        }
+    }
+}
 
 // Show color dots at key coordinates (no rotation)
 void show_dot_pattern(void) {
-    LCD_1IN47.WIDTH = LCD_1IN47.WIDTH;
-    LCD_1IN47.HEIGHT = LCD_1IN47.HEIGHT;
-
     LCD_1IN47_Clear(BLACK);
-
+    
     // Corners
-    LCD_1IN47_DisplayPoint(0, 0, RED); // Red: Top-left
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH-1, 0, GREEN); // Green: Top-right
-    LCD_1IN47_DisplayPoint(0, LCD_1IN47.HEIGHT-1, BLUE); // Blue: Bottom-left
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH-1, LCD_1IN47.HEIGHT-1, YELLOW); // Yellow: Bottom-right
-
+    LCD_1IN47_DisplayPoint(0, 0, RED);  // Red: Top-left
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH - 1, 0, GREEN);  // Green: Top-right
+    LCD_1IN47_DisplayPoint(0, LCD_1IN47.HEIGHT - 1, BLUE);  // Blue: Bottom-left
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH - 1, LCD_1IN47.HEIGHT - 1, YELLOW);  // Yellow: Bottom-right
+    
     // Edges (center of each edge)
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH/2, 0, MAGENTA); // Magenta: Top-center
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH/2, LCD_1IN47.HEIGHT-1, CYAN); // Cyan: Bottom-center
-    LCD_1IN47_DisplayPoint(0, LCD_1IN47.HEIGHT/2, WHITE); // White: Left-center
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH-1, LCD_1IN47.HEIGHT/2, GREEN); // Green: Right-center
-
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH / 2, 0, MAGENTA);  // Magenta: Top-center
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH / 2, LCD_1IN47.HEIGHT - 1, CYAN);  // Cyan: Bottom-center
+    LCD_1IN47_DisplayPoint(0, LCD_1IN47.HEIGHT / 2, WHITE);  // White: Left-center
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH - 1, LCD_1IN47.HEIGHT / 2, GREEN);  // Green: Right-center
+    
     // Center
-    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH/2, LCD_1IN47.HEIGHT/2, YELLOW); // Yellow: Center
+    LCD_1IN47_DisplayPoint(LCD_1IN47.WIDTH / 2, LCD_1IN47.HEIGHT / 2, YELLOW);  // Yellow: Center
 }
 
+// Hardware test animation using Paint rectangles
 void hardware_test_animation(void) {
     UWORD colors[] = {RED, GREEN, BLUE, YELLOW, MAGENTA, CYAN, WHITE, BLACK};
     int num_colors = sizeof(colors) / sizeof(colors[0]);
     int block_size = 16;
-
+    
     // Sequence of 2-color checkerboards
-
     for (int i = 0; i < num_colors; ++i) {
         for (int j = i + 1; j < num_colors; ++j) {
             for (int y = 0; y < LCD_1IN47.HEIGHT; y += block_size) {
@@ -354,7 +391,6 @@ void hardware_test_animation(void) {
             sleep_ms(100);
         }
     }
-    // Restore orientation for terminal
 }
 
 void lcd_clear_with_pwm(UWORD color) {
@@ -365,12 +401,16 @@ void lcd_clear_with_pwm(UWORD color) {
     sleep_ms(200);
 }
 
-int main() {
+// ========================================
+// MAIN FUNCTION
+// ========================================
 
-    if(DEV_Module_Init()!=0){
+int main(void) {
+    if (DEV_Module_Init() != 0) {
         return -1;
     }
-    /* LCD Init */
+    
+    // LCD Init
     DEV_SET_PWM(0);
 
     LCD_1IN47_Init(VERTICAL);
@@ -393,12 +433,12 @@ int main() {
 
     // Initialize Paint drawing context
     Paint_NewImage((UBYTE *)BlackImage, LCD_1IN47.WIDTH, LCD_1IN47.HEIGHT, 0, BLACK);
-    Paint_SetScale(65); // Set color depth (16/32/65 depending on your LCD/driver)
+    Paint_SetScale(65);  // Set color depth (16/32/65 depending on your LCD/driver)
 
     LCD_1IN47_Clear(WHITE);
 
     for (int i = 0; i <= 10; ++i) {
-        DEV_SET_PWM(i *10);
+        DEV_SET_PWM(i * 10);
         sleep_ms(100);
     }
 
@@ -434,12 +474,16 @@ int main() {
         "\x1b[44;93mANSI USB Terminal\n"
         "\x1b[41;93mFirmware v1.0\n"
         "\x1b[0mSerial: ";
-    for (const char *p = startup_msg; *p; ++p) process_char(*p);
-    for (const char *p = serial_str; *p; ++p) process_char(*p);
+    
+    for (const char *p = startup_msg; *p; ++p) {
+        process_char(*p);
+    }
+    for (const char *p = serial_str; *p; ++p) {
+        process_char(*p);
+    }
     process_char('\n');
     render_screen_to_lcd();
     LCD_1IN47_Display(BlackImage);
-
 
     while (true) {
         tud_task();
